@@ -4,9 +4,11 @@ CALMA data access functions
 
 from __future__ import print_function
 
-import os
 import sys
+import os
+import re
 import json
+import urlparse
 
 from rdflib import Graph, Literal, BNode, Namespace, RDF, URIRef
 from rdflib.namespace import RDF, RDFS  #, DC, FOAF
@@ -15,12 +17,14 @@ from miscutils.HttpSessionRDF import HTTP_Session
 
 from wrangle_errors import wrangle_errors, wrangle_unexpected, wrangle_missingarg, wrangle_report
 
-def read_analysis(url):
+PROV = Namespace("http://www.w3.org/ns/prov#")
+
+def read_rdf(url, graph=None):
     """
     Read analysis from supplied URL
     """
     with HTTP_Session(url) as http:
-        (status, reason, headers, rdf) = http.doRequestRDF(url)
+        (status, reason, headers, rdf) = http.doRequestRDF(url, graph=graph)
         if status != 200:
             return wrangle_report(
                 wrangle_errors.HTTPFAIL,
@@ -40,7 +44,7 @@ def explore_analysis(srcroot, userhome, userconfig, options):
         return wrangle_missingarg("analysis URL", options)
     url    = options.args[0]
     print("CALMA analysis URL %s"%url)
-    status, rdf = read_analysis(url)
+    status, rdf = read_rdf(url)
     if status != wrangle_errors.SUCCESS:
         return status
     # Poke around data and show some information
@@ -99,7 +103,7 @@ def get_type_info(rdf, t):
 
 def get_subject_info(rdf, s):
     """
-    Extract information about a subject resource
+    Extract information about a generic subject resource
     """
     if not isinstance(s, URIRef): return None
     prefix, namespace, name = rdf.namespace_manager.compute_qname(s)
@@ -110,6 +114,47 @@ def get_subject_info(rdf, s):
         , "annal:id":         name
         , "rdfs:label":       label
         , "rdfs:comment":     comment
+        , "rdfs:seeAlso":     str(s)
+        })
+    for p, o in rdf.predicate_objects(s):
+        if p != RDF.type:
+            pn, pf, pk = property_name_field_key(rdf, p)
+            sd[pk] = str(o)
+    return sd
+
+def get_activity_info(rdf, s):
+    """
+    Extract information about an activity resource
+
+    This differs from get_subject_info in that it folds the last part of the URI path
+    into the generated entity identifier.
+    """
+    if not isinstance(s, URIRef): return None
+    prefix, namespace, frag = rdf.namespace_manager.compute_qname(s)
+    upath = urlparse.urlparse(str(namespace)).path
+    uname = upath.rsplit("/",1)[1]
+    m = re.search("-([a-z0-9]{12})$", uname)
+    if m:
+        ustem = m.group(1)
+    else:
+        ustem = uname.replace("-", "_")
+    actid = "%s_%s"%(ustem, frag.replace("-", "_"))
+    if len(actid) > 32:
+        actid = actid[0:8]+"___"+actid[-20:]
+    label   = (
+        rdf.value(subject=s, predicate=RDFS.label) or 
+        "Resource %s:%s"%(prefix, frag)
+        )
+    comment = (
+        rdf.value(subject=s, predicate=RDFS.comment) or 
+        "Resource %s:%s (%s), id %s"%(prefix, frag, s, actid)
+        )
+    sd = (
+        { "annal:uri":        "%s:%s"%(prefix, frag) if prefix else str(s)
+        , "annal:id":         actid
+        , "rdfs:label":       label
+        , "rdfs:comment":     comment
+        , "rdfs:seeAlso":     str(s)
         })
     for p, o in rdf.predicate_objects(s):
         if p != RDF.type:
@@ -197,6 +242,18 @@ def export_view(rdf, t, td, colldir):
           [ { "annal:field_id":         "Entity_id"
             , "annal:field_placement":  "small:0,12;medium:0,6"
             }
+          , { "annal:field_id":         "RDF_type"
+            , "annal:field_placement":  "small:0,12;medium:0,6"
+            }
+          , { "annal:field_id":         "RDF_link"
+            , "annal:field_placement":  "small:0,12"
+            }
+          , { "annal:field_id":         "Entity_label"
+            , "annal:field_placement":  "small:0,12"
+            }
+          , { "annal:field_id":         "Entity_comment"
+            , "annal:field_placement":  "small:0,12"
+            }
           ]
         })
     fields_to_export = set()
@@ -215,9 +272,12 @@ def export_view(rdf, t, td, colldir):
     export_entity(vf, vd)
     for pn, pf, pk in fields_to_export:
         export_field(rdf, p, pn, pf, pk, colldir)
+    export_field(rdf, RDF.type, "RDF type", "RDF_type", "rdf:type", colldir)
+    export_field(rdf, RDF.type, "RDF type", "RDF_type", "annal:type", colldir)
+    export_field(rdf, RDFS.seeAlso, "See", "RDF_link", "rdfs:seeAlso", colldir, render="URILink")
     return
 
-def export_field(rdf, p, pn, pf, pk, colldir):
+def export_field(rdf, p, pn, pf, pk, colldir, render="Text"):
     """
     Export field description for given property name, field id and property key
     """
@@ -229,7 +289,7 @@ def export_field(rdf, p, pn, pf, pk, colldir):
         , "annal:id":                   pf
         , "rdfs:label":                 pn
         , "rdfs:comment":               "Field %s (%s, %s)"%(pf, pk, p)
-        , "annal:field_render_type":    "Text"
+        , "annal:field_render_type":    render
         , "annal:field_value_type":     "annal:Text"
         , "annal:placeholder":          "(%s)"%pf
         , "annal:property_uri":         pk
@@ -255,7 +315,30 @@ def export_subject(rdf, t, td, s, sd, colldir):
     export_entity(sf, ed)
     return
 
-def export_analysis(srcroot, userhome, userconfig, options):
+def export_annalist_metadata_from_graph(rdf, colldir):
+    for t in sorted(set(rdf.objects(None, RDF.type))):
+        if not str(t).startswith(str(RDF)):
+            print("Type: %s, export metadata"%t)
+            td = get_type_info(rdf, t)
+            export_type(rdf, t, td, colldir)
+            export_list(rdf, t, td, colldir)
+            export_view(rdf, t, td, colldir)
+    return wrangle_errors.SUCCESS
+
+def export_annalist_subjects_from_graph(rdf, colldir, get_subject_info=get_subject_info):
+    for t in sorted(set(rdf.objects(None, RDF.type))):
+        if not str(t).startswith(str(RDF)):
+            print("Type: %s, export subjects"%t)
+            td = get_type_info(rdf, t)
+            for s in rdf.subjects(RDF.type, t):
+                print("  Subject %s"%(s))
+                sd = get_subject_info(rdf, s)
+                if sd:
+                    print("  Subject %s/%s"%(td['annal:id'], sd['annal:id']))
+                    export_subject(rdf, t, td, s, sd, colldir)
+    return wrangle_errors.SUCCESS
+
+def export_annalist_metadata(srcroot, userhome, userconfig, options):
     """
     Read CALMA analysis data at URI supplied on command line
     and export type, list and view definitions
@@ -267,24 +350,93 @@ def export_analysis(srcroot, userhome, userconfig, options):
         return wrangle_missingarg("analysis URL", options)
     url    = options.args[0]
     print("CALMA analysis URL %s"%url)
-    status, rdf = read_analysis(url)
+    status, rdf = read_rdf(url)
     if status != wrangle_errors.SUCCESS:
         return status
     # Poke around data and show some information
-    for t in sorted(set(rdf.objects(None, RDF.type))):
-        if not str(t).startswith(str(RDF)):
-            print("Type: %s"%t)
-            td = get_type_info(rdf, t)
-            colldir = os.path.join(os.path.expanduser("~"), "annalist_site/c/CALMA_data")
-            export_type(rdf, t, td, colldir)
-            export_list(rdf, t, td, colldir)
-            export_view(rdf, t, td, colldir)
-            for s in rdf.subjects(RDF.type, t):
-                # print("  Subject %s"%(s))
-                sd = get_subject_info(rdf, s)
-                if sd:
-                    print("  Subject %s/%s"%(td['annal:id'], sd['annal:id']))
-                    export_subject(rdf, t, td, s, sd, colldir)
+    colldir = os.path.join(os.path.expanduser("~"), "annalist_site/c/CALMA_data")
+    status  = export_annalist_metadata_from_graph(rdf, colldir)
+    return status
+
+def export_annalist_subjects(srcroot, userhome, userconfig, options):
+    """
+    Read CALMA analysis data at URI supplied on command line
+    and export subject data to annalist collection
+    """
+    # Check arguments and read data
+    if len(options.args) > 1:
+        return wrangle_unexpected(options)
+    if len(options.args) == 0:
+        return wrangle_missingarg("analysis URL", options)
+    url    = options.args[0]
+    print("CALMA analysis URL %s"%url)
+    status, rdf = read_rdf(url)
+    if status != wrangle_errors.SUCCESS:
+        return status
+    # Poke around data and show some information
+    colldir = os.path.join(os.path.expanduser("~"), "annalist_site/c/CALMA_data")
+    status  = export_annalist_subjects_from_graph(rdf, colldir)
+    return status
+
+def export_analysis(srcroot, userhome, userconfig, options):
+    """
+    Read CALMA analysis data at URI supplied on command line
+    and export type, list, view and instance data definitions
+    """
+    # Check arguments and read data
+    if len(options.args) > 1:
+        return wrangle_unexpected(options)
+    if len(options.args) == 0:
+        return wrangle_missingarg("analysis URL", options)
+    url    = options.args[0]
+    print("CALMA analysis URL %s"%url)
+    status, rdf = read_rdf(url)
+    if status != wrangle_errors.SUCCESS:
+        return status
+    # Poke around data and show some information
+    colldir = os.path.join(os.path.expanduser("~"), "annalist_site/c/CALMA_data")
+    status  = export_annalist_metadata_from_graph(rdf, colldir)
+    if status != wrangle_errors.SUCCESS:
+        return status
+    status  = export_annalist_subjects_from_graph(rdf, colldir)
+    if status != wrangle_errors.SUCCESS:
+        return status
+    return status
+
+def export_analyses_multiple(srcroot, userhome, userconfig, options):
+    """
+    Read analyses listing metadata at given URL and export data for all analyses
+    """
+    # Check arguments and read analyses listing
+    if len(options.args) > 1:
+        return wrangle_unexpected(options)
+    if len(options.args) == 0:
+        return wrangle_missingarg("analyses URL", options)
+    url    = options.args[0]
+    print("CALMA analyses URL %s"%url)
+    status, rdf = read_rdf(url)
+    if status != wrangle_errors.SUCCESS:
+        return status
+    # print("  len(rdf) = %d"%len(rdf))
+    # Read referenced analyses and import data to graph
+    for a in rdf.subjects(RDF.type, PROV.Activity):
+        aurl = str(a)
+        print("CALMA analysis URL %s"%aurl)
+        status, rdf = read_rdf(aurl, graph=rdf)
+        if status != wrangle_errors.SUCCESS:
+            return status
+        # print("  len(rdf) = %d"%len(rdf))
+    # Generate metadata and subject data
+    colldir = os.path.join(os.path.expanduser("~"), "annalist_site/c/CALMA_data")
+    status  = export_annalist_metadata_from_graph(rdf, colldir)
+    if status != wrangle_errors.SUCCESS:
+        return status
+    status  = export_annalist_subjects_from_graph(
+        rdf, colldir, 
+        get_subject_info=get_activity_info
+        )
+    if status != wrangle_errors.SUCCESS:
+        return status
     return status
 
 # End.

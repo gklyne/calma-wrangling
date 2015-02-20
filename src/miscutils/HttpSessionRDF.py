@@ -366,16 +366,19 @@ class HTTP_Session(object):
             exthost     True if a request to a URI with a scheme and/or host different than 
                         the session base URI is to be respected (default False).
             graph       an rdflib.Graph object to which any RDF read is added.  If not
-                        provided, a new RDF graph is created and returmned.
+                        provided, a new RDF graph is created and returned.
 
         Return:
              status, reason(text), response headers, response graph or body
 
         """
-        (status, reason, headers, finaluri, data) = self.doRequestRDFFollowRedirect(uripath,
+        (status, reason, headers, finaluri, data) = self.doRequestRDFFollowRedirect(
+            uripath,
             method=method, body=body,
             ctype=ctype, reqheaders=reqheaders, 
-            exthost=exthost)
+            exthost=exthost, 
+            graph=graph
+            )
         return (status, reason, headers, data)
 
 # End.

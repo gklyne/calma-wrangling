@@ -26,7 +26,11 @@ sys.path.insert(0, srcroot)
 # sys.path.insert(0, dirhere)
 
 from wrangle_errors import wrangle_errors, wrangle_unexpected, wrangle_report
-from calma_data import explore_analysis, export_analysis
+from calma_data     import (
+    explore_analysis, 
+    export_analysis, export_annalist_metadata, export_annalist_subjects,
+    export_analyses_multiple
+    )
 
 VERSION = "0.1.1"
 
@@ -34,7 +38,10 @@ command_summary_help = ("\n"+
     "Commands:\n"+
     "\n"+
     "  %(prog)s explore_analysis URL\n"+
-    "  %(prog)s export_analysis URL\n"+
+    "  %(prog)s export_metadata URL\n"+
+    "  %(prog)s export_subjects URL\n"+
+    "  %(prog)s export_multiple_analyses URL\n"+
+    "  %(prog)s export_all URL\n"+
     "  %(prog)s help [command]\n"+
     "  %(prog)s version\n"+
     "")
@@ -127,7 +134,13 @@ def run(userhome, userconfig, options, progname):
     #     return am_initialize(srcroot, userhome, userconfig, options)
     if options.command.startswith("explore"):
         return explore_analysis(srcroot, userhome, userconfig, options)
-    if options.command.startswith("export"):
+    if options.command.startswith("export_met"):
+        return export_annalist_metadata(srcroot, userhome, userconfig, options)
+    if options.command.startswith("export_sub"):
+        return export_annalist_subjects(srcroot, userhome, userconfig, options)
+    if options.command.startswith("export_mul"):
+        return export_analyses_multiple(srcroot, userhome, userconfig, options)
+    if options.command.startswith("export_ana"):
         return export_analysis(srcroot, userhome, userconfig, options)
     if options.command.startswith("ver"):                   # version
         return wrangle_version(srcroot, userhome, options)
